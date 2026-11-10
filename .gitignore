@@ -1,10 +1,12 @@
+/target
 build
+configure
 .idea
-cmake-build-debug
 duckdb_unittest_tempdir/
 .DS_Store
-testext
 test/python/__pycache__/
 .Rhistory
-vcpkg
 .cache
+benchmark/data
+benchmark/results
+benchmark/__pycache__
