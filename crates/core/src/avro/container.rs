@@ -42,6 +42,17 @@ pub struct FileInfo {
 impl FileInfo {
     /// Parses the header and indexes every block, like avro-c's `avro_file_reader_memory`.
     pub fn parse(data: &[u8]) -> Result<FileInfo> {
+        let (mut info, mut decoder) = Self::parse_header_with_decoder(data)?;
+        info.blocks = index_blocks(&mut decoder, MAGIC.len(), &info.sync)?;
+        Ok(info)
+    }
+
+    /// Parses the header only; `blocks` is left empty.
+    pub fn parse_header(data: &[u8]) -> Result<FileInfo> {
+        Self::parse_header_with_decoder(data).map(|(info, _)| info)
+    }
+
+    fn parse_header_with_decoder(data: &[u8]) -> Result<(FileInfo, Decoder<'_>)> {
         if data.get(..MAGIC.len()) != Some(&MAGIC[..]) {
             return Err(AvroError::new("Incorrect Avro container file magic number"));
         }
@@ -68,14 +79,14 @@ impl FileInfo {
         let mut sync = [0u8; SYNC_SIZE];
         sync.copy_from_slice(decoder.read_fixed(SYNC_SIZE)?);
 
-        let blocks = index_blocks(&mut decoder, MAGIC.len(), &sync)?;
-        Ok(FileInfo {
+        let info = FileInfo {
             schema,
             codec,
             metadata,
             sync,
-            blocks,
-        })
+            blocks: Vec::new(),
+        };
+        Ok((info, decoder))
     }
 
     /// Decompresses a block (as indexed by `parse`) of `data`, the same buffer passed to `parse`.

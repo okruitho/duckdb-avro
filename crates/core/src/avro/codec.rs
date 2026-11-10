@@ -126,6 +126,10 @@ fn decode_snappy(data: &[u8], out: &mut Vec<u8>) -> Result<()> {
     };
     let (compressed, crc) = data.split_at(split);
     let len = snap::raw::decompress_len(compressed).map_err(|_| length_error())?;
+    // A snappy copy element of at least two bytes expands to at most 64, so this bounds what valid data decodes to
+    if len > compressed.len().saturating_mul(32).saturating_add(64) {
+        return Err(length_error());
+    }
     out.resize(len, 0);
     let written = snap::raw::Decoder::new()
         .decompress(compressed, out)
@@ -228,6 +232,17 @@ mod tests {
         Codec::Zstandard,
         Codec::Bzip2,
     ];
+
+    #[test]
+    fn snappy_rejects_impossible_lengths() {
+        // A length header of 4 GiB in front of a few bytes of data
+        let mut data = vec![0x80, 0x80, 0x80, 0x80, 0x0f, 0, 0];
+        data.extend_from_slice(&[0; 4]);
+        let mut out = Vec::new();
+        let err = Codec::Snappy.decode(&data, &mut out).unwrap_err();
+        assert_eq!(err.message, "Uncompressed length error in snappy");
+        assert!(out.capacity() < 1 << 20);
+    }
 
     fn sample(len: usize) -> Vec<u8> {
         let mut state: u32 = 12345;

@@ -184,7 +184,7 @@ fn malformed_blocks_are_errors() -> Result<()> {
             "Avro file block ended before its declared object count",
         ),
         ("enum", 1, &[1, 3], "Enum value out of range"),
-        ("truncated", 1, &[1], "Cannot read enum value"),
+        ("truncated", 1, &[1], "Avro file block ended before its declared object count"),
     ];
     for (name, count, values, message) in cases {
         let mut data = Vec::new();
@@ -209,6 +209,143 @@ fn union_of_only_nulls_reads_its_branch_index() -> Result<()> {
     assert_eq!(
         query_text(&conn, &format!("FROM read_avro('{}')", file.path()))?,
         ["NULL|42"]
+    );
+    Ok(())
+}
+
+fn read_error(conn: &Connection, sql: &str) -> String {
+    query_text(conn, sql).unwrap_err().message
+}
+
+#[test]
+fn block_counts_are_bounded_by_the_data() -> Result<()> {
+    let schema = record_schema(concat!(
+        r#"{"name":"nulls","type":{"type":"array","items":"null"}},"#,
+        r#"{"name":"ints","type":{"type":"array","items":"int"}},"#,
+        r#"{"name":"a","type":"long"}"#
+    ));
+    let conn = connect()?;
+    for (name, nulls, ints) in [("zero_width", 1i64 << 40, 0i64), ("ints", 0, 1 << 30)] {
+        let mut data = Vec::new();
+        for count in [nulls, ints] {
+            write_long(&mut data, count);
+            if count != 0 {
+                write_long(&mut data, 0);
+            }
+        }
+        write_long(&mut data, 1);
+        let file = TempFile::new(name, &schema, &[(1, data)]);
+        for columns in ["*", "a"] {
+            let message = read_error(
+                &conn,
+                &format!("SELECT {columns} FROM read_avro('{}')", file.path()),
+            );
+            assert!(
+                message.contains("Avro block claims more items than its data holds"),
+                "{name} {columns}: {message}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn schemas_that_expand_too_far_are_errors() -> Result<()> {
+    let conn = connect()?;
+    // Each record references the one before twice, doubling the size of the expanded type
+    let mut branches =
+        vec![r#"{"type":"record","name":"R0","fields":[{"name":"x","type":"int"}]}"#.to_owned()];
+    for index in 1..40 {
+        let previous = index - 1;
+        branches.push(format!(
+            r#"{{"type":"record","name":"R{index}","fields":[{{"name":"a","type":"R{previous}"}},{{"name":"b","type":"R{previous}"}}]}}"#
+        ));
+    }
+    let file = TempFile::new("wide_schema", &format!("[{}]", branches.join(",")), &[]);
+    let message = read_error(&conn, &format!("FROM read_avro('{}')", file.path()));
+    assert!(
+        message.contains("Avro schema expands into too many types"),
+        "{message}"
+    );
+
+    let mut branches =
+        vec![r#"{"type":"record","name":"R0","fields":[{"name":"x","type":"int"}]}"#.to_owned()];
+    for index in 1..300 {
+        let previous = index - 1;
+        branches.push(format!(
+            r#"{{"type":"record","name":"R{index}","fields":[{{"name":"a","type":"R{previous}"}}]}}"#
+        ));
+    }
+    let file = TempFile::new("deep_schema", &format!("[{}]", branches.join(",")), &[]);
+    let message = read_error(&conn, &format!("FROM read_avro('{}')", file.path()));
+    assert!(
+        message.contains("Avro schema is nested too deeply"),
+        "{message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn temporal_logical_types_on_bytes_are_ignored() -> Result<()> {
+    let schema = record_schema(r#"{"name":"b","type":{"type":"bytes","logicalType":"date"}}"#);
+    let mut data = Vec::new();
+    write_bytes(&mut data, b"\x01\x02");
+    let file = TempFile::new("bytes_date", &schema, &[(1, data)]);
+    let conn = connect()?;
+    let sql = format!("SELECT typeof(b), hex(b) FROM read_avro('{}')", file.path());
+    assert_eq!(query_text(&conn, &sql)?, ["BLOB|0102"]);
+    Ok(())
+}
+
+#[test]
+fn row_cut_off_at_a_value_boundary_ends_the_block_early() -> Result<()> {
+    let schema = record_schema(r#"{"name":"a","type":"long"},{"name":"s","type":"string"}"#);
+    let mut data = Vec::new();
+    write_long(&mut data, 1);
+    let file = TempFile::new("cut_off", &schema, &[(1, data)]);
+    let conn = connect()?;
+    let message = read_error(&conn, &format!("FROM read_avro('{}')", file.path()));
+    assert!(
+        message.contains("Avro file block ended before its declared object count"),
+        "{message}"
+    );
+
+    let mut data = Vec::new();
+    write_long(&mut data, 1);
+    write_long(&mut data, 10);
+    data.extend_from_slice(b"ab");
+    let file = TempFile::new("cut_off_value", &schema, &[(1, data)]);
+    let message = read_error(&conn, &format!("FROM read_avro('{}')", file.path()));
+    assert!(
+        message.contains("Cannot read string value: Cannot read 10 bytes from memory buffer"),
+        "{message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn metadata_needs_only_the_header() -> Result<()> {
+    let schema = record_schema(r#"{"name":"a","type":"long"}"#);
+    let file = TempFile::new("metadata_header", &schema, &[(1, vec![2])]);
+    let mut bytes = std::fs::read(file.path()).unwrap();
+    bytes.extend_from_slice(b"garbage after the blocks");
+    std::fs::write(file.path(), bytes).unwrap();
+    let conn = connect()?;
+    let sql = format!(
+        "SELECT key FROM avro_metadata('{}') ORDER BY key",
+        file.path()
+    );
+    assert_eq!(query_text(&conn, &sql)?, ["avro.codec", "avro.schema"]);
+    let message = read_error(
+        &conn,
+        &format!("FROM avro_metadata('{}/missing')", file.path()),
+    );
+    assert!(!message.is_empty());
+    std::fs::write(file.path(), b"not avro").unwrap();
+    let message = read_error(&conn, &format!("FROM avro_metadata('{}')", file.path()));
+    assert!(
+        message.contains("Failed to read Avro file: Incorrect Avro container file magic number"),
+        "{message}"
     );
     Ok(())
 }

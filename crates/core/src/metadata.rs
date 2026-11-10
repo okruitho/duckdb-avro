@@ -63,7 +63,8 @@ impl TableFunctionCallbacks for AvroMetadata {
             options: Vec::new(),
         };
         let buffer = read_file(context, &file)?;
-        let info = FileInfo::parse(&buffer)?;
+        let info = FileInfo::parse_header(&buffer)
+            .map_err(|error| error.prefixed("Failed to read Avro file: "))?;
         let entries = info
             .metadata
             .into_iter()

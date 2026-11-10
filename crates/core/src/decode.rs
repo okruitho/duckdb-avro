@@ -74,10 +74,9 @@ fn read_block_count(
     }
     let count = count.unsigned_abs();
     *items = items.saturating_add(count);
-    let fits = if item_size == 0 {
-        *items <= MAX_ZERO_WIDTH_ITEMS
-    } else {
-        count <= (decoder.remaining() / item_size) as u64
+    let fits = match decoder.remaining().checked_div(item_size) {
+        Some(limit) => count <= limit as u64,
+        None => *items <= MAX_ZERO_WIDTH_ITEMS,
     };
     if !fits {
         return Err(AvroError::new(
@@ -157,11 +156,13 @@ enum Data {
         map: bool,
         entries: Vec<[u64; 2]>,
         child: Box<Column>,
+        item_size: usize,
     },
     Map {
         entries: Vec<[u64; 2]>,
         keys: Box<Column>,
         values: Box<Column>,
+        entry_size: usize,
     },
     Union {
         members: Vec<Option<usize>>,
@@ -179,6 +180,7 @@ enum Data {
 #[derive(Debug)]
 pub struct Column {
     kind: AvroKind,
+    type_id: LogicalTypeID,
     fixed_size: usize,
     validity: Vec<bool>,
     data: Data,
@@ -256,12 +258,14 @@ impl Column {
                     map: avro_type.type_id == LogicalTypeID::Map,
                     entries: Vec::new(),
                     child: Box::new(Column::new(&avro_type.children[0].1)?),
+                    item_size: avro_type.children[0].1.min_size,
                 }
             }
             LogicalTypeID::Map => Data::Map {
                 entries: Vec::new(),
                 keys: Box::new(Column::new(&avro_type.children[0].1)?),
                 values: Box::new(Column::new(&avro_type.children[1].1)?),
+                entry_size: 1 + avro_type.children[1].1.min_size,
             },
             LogicalTypeID::Union => match avro_type.non_null_member_count() {
                 0 => Data::Null {
@@ -295,8 +299,13 @@ impl Column {
                 )));
             }
         };
+        let type_id = match data {
+            Data::Null { .. } => LogicalTypeID::SqlNull,
+            _ => avro_type.type_id,
+        };
         Ok(Column {
             kind: avro_type.kind,
+            type_id,
             fixed_size: avro_type.fixed_size,
             validity: Vec::new(),
             data,
@@ -341,6 +350,7 @@ impl Column {
                 entries,
                 keys,
                 values,
+                ..
             } => {
                 entries.clear();
                 keys.clear();
@@ -421,9 +431,10 @@ impl Column {
                 "Cannot read double value: ",
             )?),
             Data::Uuid(values) => {
-                let bytes: [u8; 16] = prefixed(decoder.read_fixed(16), "Cannot read fixed value: ")?
-                    .try_into()
-                    .map_err(|_| internal("UUID is not 16 bytes"))?;
+                let bytes: [u8; 16] =
+                    prefixed(decoder.read_fixed(16), "Cannot read fixed value: ")?
+                        .try_into()
+                        .map_err(|_| internal("UUID is not 16 bytes"))?;
                 let value = UuidValueRaw::from_bytes(bytes).0;
                 values.push([value as u64, (value >> 64) as u64]);
             }
@@ -680,7 +691,10 @@ pub fn skip(avro_type: &AvroType, decoder: &mut Decoder<'_>) -> Result<()> {
         AvroKind::Bytes | AvroKind::String => {
             prefixed(decoder.read_bytes(), "Cannot read bytes value: ")?;
         }
-        AvroKind::Fixed => prefixed(decoder.skip(avro_type.fixed_size), "Cannot read fixed value: ")?,
+        AvroKind::Fixed => prefixed(
+            decoder.skip(avro_type.fixed_size),
+            "Cannot read fixed value: ",
+        )?,
         AvroKind::Record => {
             for (_, child) in &avro_type.children {
                 skip(child, decoder)?;
@@ -775,6 +789,13 @@ macro_rules! fill_vector {
             let validity = column.validity.as_slice();
             match &column.data {
                 Data::Collapsed { child, .. } => return $name(vector, child),
+                _ if vector.logical_type().id()? != column.type_id => {
+                    return Err(internal(format!(
+                        "Avro column of type {:?} for a vector of type {}",
+                        column.type_id,
+                        vector.logical_type()
+                    )));
+                }
                 Data::Null { .. } => {
                     let mut writer = vector.writer()?;
                     check_len(writer.len(), validity.len())?;
@@ -861,6 +882,7 @@ macro_rules! fill_vector {
                     map: false,
                     entries,
                     child,
+                    ..
                 } => {
                     let mut vector = vector.cast::<List<Unknown>>()?;
                     // SAFETY: every element of the child is written below.
@@ -873,6 +895,7 @@ macro_rules! fill_vector {
                     map: true,
                     entries,
                     child,
+                    ..
                 } => {
                     let mut vector = vector.cast::<Map<Unknown, Unknown>>()?;
                     // SAFETY: every entry of the child is written below.
@@ -885,6 +908,7 @@ macro_rules! fill_vector {
                     entries,
                     keys,
                     values,
+                    ..
                 } => {
                     let mut vector = vector.cast::<Map<Unknown, Unknown>>()?;
                     // SAFETY: every entry of the child is written below.
@@ -892,7 +916,11 @@ macro_rules! fill_vector {
                     write_values(&mut vector.writer()?, entries, validity)?;
                     let mut children = vector.children_mut().expect("MAP has entries");
                     let mut entries = children.get_untyped_vector_at_mut(0)?;
-                    write_validity(&mut entries.writer()?, &vec![true; keys.len()])?;
+                    let mut writer = entries.writer()?;
+                    check_len(writer.len(), keys.len())?;
+                    // SAFETY: every entry has a key and a value, written below.
+                    unsafe { writer.fill_validity(true)? };
+                    drop(writer);
                     let mut fields = entries
                         .children_mut()
                         .expect("MAP entries have a key and a value");

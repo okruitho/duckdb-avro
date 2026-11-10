@@ -137,6 +137,18 @@ fn annotation(node: &Node) -> Result<Option<LogicalAnnotation>> {
         scale: 0,
     };
     result.type_id = match logical_type {
+        // Logical types that annotate a type they cannot annotate are ignored, as the specification says
+        "date"
+        | "time-micros"
+        | "time-millis"
+        | "timestamp-micros"
+        | "timestamp-millis"
+        | "timestamp-nanos"
+        | "local-timestamp-millis"
+            if !integer =>
+        {
+            return Ok(None);
+        }
         "date" => LogicalTypeID::Date,
         "decimal" => {
             // An absent precision or scale is -1, which is out of range for DuckDB and fails when creating the type.
@@ -152,13 +164,6 @@ fn annotation(node: &Node) -> Result<Option<LogicalAnnotation>> {
             result.width = precision as u8;
             result.scale = scale as u8;
             LogicalTypeID::Decimal
-        }
-        // Logical types that annotate a type they cannot annotate are ignored, as the specification says
-        "date" | "time-micros" | "time-millis" | "timestamp-micros" | "timestamp-millis" | "timestamp-nanos"
-        | "local-timestamp-millis"
-            if !integer =>
-        {
-            return Ok(None);
         }
         "time-micros" | "time-millis" => LogicalTypeID::Time,
         "timestamp-micros" | "timestamp-millis" if adjust_to_utc => LogicalTypeID::TimestampTz,
@@ -230,7 +235,11 @@ fn transform_node(schema: &Schema, id: NodeId, state: &mut TransformState) -> Re
         AvroKind::Float => 4,
         AvroKind::Double => 8,
         AvroKind::Fixed => result.fixed_size,
-        AvroKind::Record => result.children.iter().map(|(_, child)| child.min_size).sum(),
+        AvroKind::Record => result
+            .children
+            .iter()
+            .map(|(_, child)| child.min_size)
+            .sum(),
         _ => 1,
     };
     Ok(result)

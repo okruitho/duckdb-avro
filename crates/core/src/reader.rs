@@ -41,7 +41,7 @@ pub struct AvroFile {
     buffer: Vec<u8>,
     info: FileInfo,
     avro_type: Arc<AvroType>,
-    /// Whether the root is a record, whose fields are pulled up into the columns.
+    // A record root has its fields pulled up into the columns.
     root_is_struct: bool,
     columns: Vec<AvroColumn>,
 }
@@ -79,12 +79,10 @@ impl AvroFile {
     }
 }
 
-/// How the values of a row reach the projected columns.
 #[derive(Debug)]
 enum RowReader {
-    /// The root is a value of a single column.
     Value(Column),
-    /// The root is a record, possibly wrapped in unions with NULL; each field goes to its projected column, if any.
+    // The record may be wrapped in unions with NULL; fields that are not projected are skipped.
     Record {
         root: Arc<AvroType>,
         fields: Vec<Option<usize>>,
@@ -92,7 +90,6 @@ enum RowReader {
     },
 }
 
-/// The record a root that is read as a STRUCT holds its fields in.
 fn root_record(root: &AvroType) -> &AvroType {
     let mut record = root;
     while record.kind == crate::types::AvroKind::Union {
@@ -107,6 +104,11 @@ fn root_record(root: &AvroType) -> &AvroType {
 impl RowReader {
     fn new(file: &AvroFile, column_ids: &[usize]) -> Result<RowReader> {
         if !file.root_is_struct {
+            if column_ids.iter().any(|column_id| *column_id != 0) {
+                return Err(invalid_input(format!(
+                    "Invalid column indexes {column_ids:?}"
+                )));
+            }
             return Ok(RowReader::Value(Column::new(&file.avro_type)?));
         }
         let record = root_record(&file.avro_type);
@@ -178,12 +180,9 @@ impl RowReader {
     }
 }
 
-/// Where the decoded data of the selected block lives.
 #[derive(Debug, Clone, Copy)]
 enum BlockData {
-    /// Uncompressed, in the file buffer.
     File { offset: usize, size: usize },
-    /// Decompressed into the scratch buffer.
     Scratch { size: usize },
 }
 
@@ -242,9 +241,9 @@ impl ScanState {
                 }
                 break;
             }
-            let at_end = decoder.is_empty();
             if let Err(error) = self.rows.read_row(&mut decoder) {
-                if at_end {
+                // Running out of data at a value boundary is what avro-c reports as the block ending early
+                if decoder.is_empty() && error.message.ends_with("bytes from memory buffer") {
                     return Err(invalid_input(
                         "Avro file block ended before its declared object count",
                     ));
