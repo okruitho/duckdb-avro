@@ -11,7 +11,7 @@ benchmark/build_baseline.sh
 make release
 
 benchmark/run.py \
-    --build cpp=$HOME/duckdb-avro-cpp/build/release/extension/avro/avro.duckdb_extension \
+    --build cpp=$HOME/duckdb-avro-cpp/build/release/avro.duckdb_extension \
     --build rust=build/release/avro.duckdb_extension
 ```
 

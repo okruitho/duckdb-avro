@@ -60,7 +60,11 @@ impl AvroFile {
         let avro_type = transform_schema(schema, schema.root())?;
         let root = transform_avro_type(context, &root_name, &avro_type)?;
         let root_is_struct = root.logical_type.id()? == LogicalTypeID::Struct;
-        let columns = if root_is_struct { root.children } else { vec![root] };
+        let columns = if root_is_struct {
+            root.children
+        } else {
+            vec![root]
+        };
         Ok(AvroFile {
             buffer,
             info,
@@ -92,7 +96,9 @@ enum RowReader {
 fn root_record(root: &AvroType) -> &AvroType {
     let mut record = root;
     while record.kind == crate::types::AvroKind::Union {
-        let branch = record.single_member_branch().expect("a STRUCT root has one member");
+        let branch = record
+            .single_member_branch()
+            .expect("a STRUCT root has one member");
         record = &record.children[branch].1;
     }
     record
@@ -137,15 +143,25 @@ impl RowReader {
     fn read_row(&mut self, decoder: &mut Decoder<'_>) -> Result<()> {
         let (root, fields, columns) = match self {
             RowReader::Value(column) => return column.read(decoder),
-            RowReader::Record { root, fields, columns } => (root, fields, columns),
+            RowReader::Record {
+                root,
+                fields,
+                columns,
+            } => (root, fields, columns),
         };
         let mut record: &AvroType = root;
         while record.kind == crate::types::AvroKind::Union {
-            let discriminant = decoder.read_long().map_err(|e| e.prefixed("Cannot read union discriminant: "))?;
+            let discriminant = decoder
+                .read_long()
+                .map_err(|e| e.prefixed("Cannot read union discriminant: "))?;
             let branch = usize::try_from(discriminant)
                 .ok()
                 .filter(|branch| *branch < record.children.len())
-                .ok_or_else(|| invalid_input(format!("Invalid union discriminant value: ({discriminant})")))?;
+                .ok_or_else(|| {
+                    invalid_input(format!(
+                        "Invalid union discriminant value: ({discriminant})"
+                    ))
+                })?;
             record = &record.children[branch].1;
             if record.type_id == LogicalTypeID::SqlNull {
                 columns.iter_mut().for_each(Column::push_null);
@@ -190,7 +206,10 @@ impl ScanState {
                 size: block.size,
             });
         }
-        let size = file.info.decode_block(&file.buffer, block, &mut self.scratch)?.len();
+        let size = file
+            .info
+            .decode_block(&file.buffer, block, &mut self.scratch)?
+            .len();
         Ok(BlockData::Scratch { size })
     }
 
@@ -266,7 +285,11 @@ impl TableFunctionCallbacks for AvroScan {
         let file = arguments
             .first()
             .and_then(|argument| argument.value.as_ref())
-            .ok_or_else(|| binder(format!("{SINGLE_FILE_FUNCTION} requires a constant file argument")))?;
+            .ok_or_else(|| {
+                binder(format!(
+                    "{SINGLE_FILE_FUNCTION} requires a constant file argument"
+                ))
+            })?;
         let file = AvroFile::open(context, &FileArgument::parse(file)?)?;
         for column in &file.columns {
             bind_handle.add_result_column(&column.name, &column.logical_type)?;
@@ -280,7 +303,10 @@ impl TableFunctionCallbacks for AvroScan {
         _context: &Context,
         _column_data: InitColumnData<'_>,
     ) -> Result<(Option<AtomicUsize>, Option<usize>)> {
-        Ok((Some(AtomicUsize::new(0)), Some(bind_data.block_count().max(1))))
+        Ok((
+            Some(AtomicUsize::new(0)),
+            Some(bind_data.block_count().max(1)),
+        ))
     }
 
     fn init_local_state(
@@ -364,7 +390,12 @@ fn set_column_identifiers(
 impl TableGetBindInfoCallbacks for AvroScan {
     /// Describes the file: the field ids of its columns, and its key-value metadata as options - which a multi-file
     /// reader exposes as the metadata of the reader of the file.
-    fn bind_info(&self, bind_data: &AvroFile, context: &Context, api: BindInfoApi<'_>) -> Result<()> {
+    fn bind_info(
+        &self,
+        bind_data: &AvroFile,
+        context: &Context,
+        api: BindInfoApi<'_>,
+    ) -> Result<()> {
         for (index, column) in bind_data.columns.iter().enumerate() {
             set_column_identifiers(&api, context, column, index, &mut Vec::new())?;
         }

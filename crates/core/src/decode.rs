@@ -37,16 +37,54 @@ fn read_union_branch(decoder: &mut Decoder<'_>, branch_count: usize) -> AvroResu
     usize::try_from(discriminant)
         .ok()
         .filter(|branch| *branch < branch_count)
-        .ok_or_else(|| AvroError::new(format!("Invalid union discriminant value: ({discriminant})")))
+        .ok_or_else(|| {
+            AvroError::new(format!(
+                "Invalid union discriminant value: ({discriminant})"
+            ))
+        })
 }
 
-/// Reads the count of the next block of an array or map, skipping the byte size of a negative count.
-fn read_block_count(decoder: &mut Decoder<'_>, what: &str) -> AvroResult<u64> {
-    let count = prefixed(decoder.read_long(), &format!("Cannot read {what} block count: "))?;
+struct BlockMessages {
+    count: &'static str,
+    size: &'static str,
+}
+
+const ARRAY_BLOCK: BlockMessages = BlockMessages {
+    count: "Cannot read array block count: ",
+    size: "Cannot read array block size: ",
+};
+const MAP_BLOCK: BlockMessages = BlockMessages {
+    count: "Cannot read map block count: ",
+    size: "Cannot read map block size: ",
+};
+
+// Items that take no bytes are not bounded by the data, so their number is capped instead.
+const MAX_ZERO_WIDTH_ITEMS: u64 = 1 << 24;
+
+// The byte size of a negative count is ignored like avro-c does, so that skipping a value reads as much as reading it.
+fn read_block_count(
+    decoder: &mut Decoder<'_>,
+    messages: &BlockMessages,
+    item_size: usize,
+    items: &mut u64,
+) -> AvroResult<u64> {
+    let count = prefixed(decoder.read_long(), messages.count)?;
     if count < 0 {
-        prefixed(decoder.read_long(), &format!("Cannot read {what} block size: "))?;
+        prefixed(decoder.read_long(), messages.size)?;
     }
-    Ok(count.unsigned_abs())
+    let count = count.unsigned_abs();
+    *items = items.saturating_add(count);
+    let fits = if item_size == 0 {
+        *items <= MAX_ZERO_WIDTH_ITEMS
+    } else {
+        count <= (decoder.remaining() / item_size) as u64
+    };
+    if !fits {
+        return Err(AvroError::new(
+            "Avro block claims more items than its data holds",
+        ));
+    }
+    Ok(count)
 }
 
 fn millis_to_micros(millis: i64) -> Result<i64> {
@@ -57,7 +95,7 @@ fn millis_to_micros(millis: i64) -> Result<i64> {
     })
 }
 
-/// Sign-extends a big-endian two's complement integer, keeping its lowest 128 bits.
+// Keeps the lowest 128 bits of wider integers, like the C++ implementation did.
 fn read_big_endian(bytes: &[u8]) -> i128 {
     let negative = bytes.first().is_some_and(|byte| byte & 0x80 != 0);
     let init = if negative { u128::MAX } else { 0 };
@@ -70,7 +108,6 @@ fn invalid_string() -> duckdb_neo::Error {
     invalid_input("Avro file contains invalid unicode string")
 }
 
-/// The physical type of a DECIMAL vector, which follows from its width.
 #[derive(Debug, Clone, Copy)]
 enum DecimalStorage {
     Short,
@@ -79,7 +116,6 @@ enum DecimalStorage {
     Huge,
 }
 
-/// The physical type of an ENUM vector, which follows from the number of symbols.
 #[derive(Debug, Clone, Copy)]
 enum EnumStorage {
     U8,
@@ -89,13 +125,12 @@ enum EnumStorage {
 
 #[derive(Debug)]
 enum Data {
-    /// Every row is NULL. A union without members that are not NULL still has a branch index to read.
+    // A union without members that are not NULL still has a branch index to read.
     Null {
         union_branches: Option<usize>,
     },
     Boolean(Vec<bool>),
     Int(Vec<i32>),
-    /// BIGINT, TIME and the timestamps; millisecond values are scaled to microseconds.
     Long {
         millis: bool,
         values: Vec<i64>,
@@ -118,7 +153,6 @@ enum Data {
         values: Vec<u32>,
     },
     Struct(Vec<Column>),
-    /// A LIST, or an Avro array of key/value records read as a MAP.
     List {
         map: bool,
         entries: Vec<[u64; 2]>,
@@ -134,7 +168,6 @@ enum Data {
         tags: Vec<u8>,
         children: Vec<Column>,
     },
-    /// A union of NULL and a single other type, read straight into the vector of that type.
     Collapsed {
         branch: usize,
         branch_count: usize,
@@ -218,11 +251,13 @@ impl Column {
                     .map(|(_, child)| Column::new(child))
                     .collect::<Result<_>>()?,
             ),
-            LogicalTypeID::Map | LogicalTypeID::List if avro_type.kind == AvroKind::Array => Data::List {
-                map: avro_type.type_id == LogicalTypeID::Map,
-                entries: Vec::new(),
-                child: Box::new(Column::new(&avro_type.children[0].1)?),
-            },
+            LogicalTypeID::Map | LogicalTypeID::List if avro_type.kind == AvroKind::Array => {
+                Data::List {
+                    map: avro_type.type_id == LogicalTypeID::Map,
+                    entries: Vec::new(),
+                    child: Box::new(Column::new(&avro_type.children[0].1)?),
+                }
+            }
             LogicalTypeID::Map => Data::Map {
                 entries: Vec::new(),
                 keys: Box::new(Column::new(&avro_type.children[0].1)?),
@@ -302,7 +337,11 @@ impl Column {
                 entries.clear();
                 child.clear();
             }
-            Data::Map { entries, keys, values } => {
+            Data::Map {
+                entries,
+                keys,
+                values,
+            } => {
                 entries.clear();
                 keys.clear();
                 values.clear();
@@ -355,20 +394,34 @@ impl Column {
                 self.validity.push(false);
                 return Ok(());
             }
-            Data::Boolean(values) => values.push(prefixed(decoder.read_boolean(), "Cannot read boolean value: ")?),
+            Data::Boolean(values) => values.push(prefixed(
+                decoder.read_boolean(),
+                "Cannot read boolean value: ",
+            )?),
             Data::Int(values) => {
                 let value = read_integer(decoder, kind)?;
-                values.push(i32::try_from(value).map_err(|_| AvroError::new("Varint out of range for int type"))?);
+                values.push(
+                    i32::try_from(value)
+                        .map_err(|_| AvroError::new("Varint out of range for int type"))?,
+                );
             }
             Data::Long { millis, values } => {
                 let value = read_integer(decoder, kind)?;
-                values.push(if *millis { millis_to_micros(value)? } else { value });
+                values.push(if *millis {
+                    millis_to_micros(value)?
+                } else {
+                    value
+                });
             }
-            Data::Float(values) => values.push(prefixed(decoder.read_float(), "Cannot read float value: ")?),
-            Data::Double(values) => values.push(prefixed(decoder.read_double(), "Cannot read double value: ")?),
+            Data::Float(values) => {
+                values.push(prefixed(decoder.read_float(), "Cannot read float value: ")?)
+            }
+            Data::Double(values) => values.push(prefixed(
+                decoder.read_double(),
+                "Cannot read double value: ",
+            )?),
             Data::Uuid(values) => {
-                let bytes: [u8; 16] = decoder
-                    .read_fixed(16)?
+                let bytes: [u8; 16] = prefixed(decoder.read_fixed(16), "Cannot read fixed value: ")?
                     .try_into()
                     .map_err(|_| internal("UUID is not 16 bytes"))?;
                 let value = UuidValueRaw::from_bytes(bytes).0;
@@ -376,16 +429,24 @@ impl Column {
             }
             Data::Decimal { values, .. } => {
                 let bytes = if kind == AvroKind::Fixed {
-                    decoder.read_fixed(fixed_size)?
+                    prefixed(decoder.read_fixed(fixed_size), "Cannot read fixed value: ")?
                 } else {
                     prefixed(decoder.read_bytes(), "Cannot read bytes value: ")?
                 };
                 values.push(read_big_endian(bytes));
             }
-            Data::Bytes { varchar, data, ranges } => {
+            Data::Bytes {
+                varchar,
+                data,
+                ranges,
+            } => {
                 let bytes = match kind {
-                    AvroKind::Fixed => decoder.read_fixed(fixed_size)?,
-                    AvroKind::String => prefixed(decoder.read_bytes(), "Cannot read string value: ")?,
+                    AvroKind::Fixed => {
+                        prefixed(decoder.read_fixed(fixed_size), "Cannot read fixed value: ")?
+                    }
+                    AvroKind::String => {
+                        prefixed(decoder.read_bytes(), "Cannot read string value: ")?
+                    }
                     _ => prefixed(decoder.read_bytes(), "Cannot read bytes value: ")?,
                 };
                 if *varchar && std::str::from_utf8(bytes).is_err() {
@@ -407,10 +468,16 @@ impl Column {
                     field.read(decoder)?;
                 }
             }
-            Data::List { entries, child, .. } => {
+            Data::List {
+                entries,
+                child,
+                item_size,
+                ..
+            } => {
                 let offset = child.len();
+                let mut items = 0;
                 loop {
-                    let count = read_block_count(decoder, "array")?;
+                    let count = read_block_count(decoder, &ARRAY_BLOCK, *item_size, &mut items)?;
                     if count == 0 {
                         break;
                     }
@@ -420,12 +487,21 @@ impl Column {
                 }
                 entries.push([offset as u64, (child.len() - offset) as u64]);
             }
-            Data::Map { entries, keys, values } => {
+            Data::Map {
+                entries,
+                keys,
+                values,
+                entry_size,
+            } => {
                 let offset = keys.len();
-                read_map(decoder, offset, keys, values)?;
+                read_map(decoder, offset, keys, values, *entry_size)?;
                 entries.push([offset as u64, (keys.len() - offset) as u64]);
             }
-            Data::Union { members, tags, children } => {
+            Data::Union {
+                members,
+                tags,
+                children,
+            } => {
                 let branch = read_union_branch(decoder, members.len())?;
                 let Some(member) = members[branch] else {
                     tags.push(0);
@@ -459,7 +535,6 @@ impl Column {
         Ok(())
     }
 
-    /// Copies row `from` over row `to`.
     fn move_row(&mut self, from: usize, to: usize) {
         if let Data::Collapsed { child, .. } = &mut self.data {
             child.move_row(from, to);
@@ -481,12 +556,14 @@ impl Column {
             Data::List { entries, .. } | Data::Map { entries, .. } => entries[to] = entries[from],
             Data::Union { tags, children, .. } => {
                 tags[to] = tags[from];
-                children.iter_mut().for_each(|child| child.move_row(from, to));
+                children
+                    .iter_mut()
+                    .for_each(|child| child.move_row(from, to));
             }
         }
     }
 
-    /// Drops the rows from `len` on; the children they used stay, unreferenced.
+    // The children of dropped rows stay, unreferenced.
     fn truncate(&mut self, len: usize) {
         if let Data::Collapsed { child, .. } = &mut self.data {
             child.truncate(len);
@@ -532,11 +609,18 @@ impl Column {
     }
 }
 
-/// Reads the entries of a map. Like a map in memory, a key that repeats keeps its first position and its last value.
-fn read_map(decoder: &mut Decoder<'_>, offset: usize, keys: &mut Column, values: &mut Column) -> Result<()> {
+// A key that repeats keeps its first position and its last value, like it does in avro-c's in-memory map.
+fn read_map(
+    decoder: &mut Decoder<'_>,
+    offset: usize,
+    keys: &mut Column,
+    values: &mut Column,
+    entry_size: usize,
+) -> Result<()> {
     let mut index: Option<HashMap<Vec<u8>, usize>> = None;
+    let mut items = 0;
     loop {
-        let count = read_block_count(decoder, "map")?;
+        let count = read_block_count(decoder, &MAP_BLOCK, entry_size, &mut items)?;
         if count == 0 {
             return Ok(());
         }
@@ -549,7 +633,11 @@ fn read_map(decoder: &mut Decoder<'_>, offset: usize, keys: &mut Column, values:
             }
             let entries = keys.len() - offset;
             if entries == MAP_HASH_THRESHOLD && index.is_none() {
-                index = Some((offset..keys.len()).map(|row| (keys.key(row).to_vec(), row)).collect());
+                index = Some(
+                    (offset..keys.len())
+                        .map(|row| (keys.key(row).to_vec(), row))
+                        .collect(),
+                );
             }
             let existing = match &index {
                 Some(index) => index.get(key).copied(),
@@ -579,42 +667,49 @@ pub fn skip(avro_type: &AvroType, decoder: &mut Decoder<'_>) -> Result<()> {
     match avro_type.kind {
         AvroKind::Null => {}
         AvroKind::Boolean => {
-            prefixed(decoder.read_boolean(), "Cannot skip boolean value: ")?;
+            prefixed(decoder.read_boolean(), "Cannot read boolean value: ")?;
         }
-        AvroKind::Int | AvroKind::Long | AvroKind::Enum => {
-            prefixed(decoder.read_long(), "Cannot skip long value: ")?;
+        AvroKind::Int => {
+            prefixed(decoder.read_int(), "Cannot read int value: ")?;
+        }
+        AvroKind::Long | AvroKind::Enum => {
+            prefixed(decoder.read_long(), "Cannot read long value: ")?;
         }
         AvroKind::Float => decoder.skip(4)?,
         AvroKind::Double => decoder.skip(8)?,
         AvroKind::Bytes | AvroKind::String => {
-            prefixed(decoder.read_bytes(), "Cannot skip bytes value: ")?;
+            prefixed(decoder.read_bytes(), "Cannot read bytes value: ")?;
         }
-        AvroKind::Fixed => decoder.skip(avro_type.fixed_size)?,
+        AvroKind::Fixed => prefixed(decoder.skip(avro_type.fixed_size), "Cannot read fixed value: ")?,
         AvroKind::Record => {
             for (_, child) in &avro_type.children {
                 skip(child, decoder)?;
             }
         }
-        AvroKind::Array | AvroKind::Map => {
-            let what = if avro_type.kind == AvroKind::Array { "array" } else { "map" };
+        AvroKind::Array => {
+            let item = &avro_type.children[0].1;
+            let mut items = 0;
             loop {
-                let count = prefixed(decoder.read_long(), &format!("Cannot read {what} block count: "))?;
+                let count = read_block_count(decoder, &ARRAY_BLOCK, item.min_size, &mut items)?;
                 if count == 0 {
                     break;
                 }
-                if count < 0 {
-                    let size = prefixed(decoder.read_long(), &format!("Cannot read {what} block size: "))?;
-                    let size = usize::try_from(size).map_err(|_| AvroError::new("Invalid Avro block size"))?;
-                    decoder.skip(size)?;
-                    continue;
+                for _ in 0..count {
+                    skip(item, decoder)?;
+                }
+            }
+        }
+        AvroKind::Map => {
+            let value = &avro_type.children[1].1;
+            let mut items = 0;
+            loop {
+                let count = read_block_count(decoder, &MAP_BLOCK, 1 + value.min_size, &mut items)?;
+                if count == 0 {
+                    break;
                 }
                 for _ in 0..count {
-                    if avro_type.kind == AvroKind::Map {
-                        prefixed(decoder.read_bytes(), "Cannot read map key: ")?;
-                        skip(&avro_type.children[1].1, decoder)?;
-                    } else {
-                        skip(&avro_type.children[0].1, decoder)?;
-                    }
+                    prefixed(decoder.read_bytes(), "Cannot read map key: ")?;
+                    skip(value, decoder)?;
                 }
             }
         }
@@ -635,7 +730,10 @@ fn check_len(expected: usize, actual: usize) -> Result<()> {
     Ok(())
 }
 
-fn write_validity<E: VectorElement>(writer: &mut VectorWriter<'_, E>, validity: &[bool]) -> Result<()> {
+fn write_validity<E: VectorElement>(
+    writer: &mut VectorWriter<'_, E>,
+    validity: &[bool],
+) -> Result<()> {
     check_len(writer.len(), validity.len())?;
     // SAFETY: every row the validity marks valid is written by the caller before the vector is read.
     unsafe {
@@ -649,7 +747,6 @@ fn write_validity<E: VectorElement>(writer: &mut VectorWriter<'_, E>, validity: 
     Ok(())
 }
 
-/// Copies values of the vector's physical type `T` into its storage.
 fn write_values<E: VectorElement, T: Copy>(
     writer: &mut VectorWriter<'_, E>,
     values: &[T],
@@ -693,9 +790,15 @@ macro_rules! fill_vector {
                 Data::Decimal { storage, values } => {
                     let mut writer = vector.writer()?;
                     match storage {
-                        DecimalStorage::Short => write_values(&mut writer, &convert(values, |v| v as i16), validity)?,
-                        DecimalStorage::Word => write_values(&mut writer, &convert(values, |v| v as i32), validity)?,
-                        DecimalStorage::Long => write_values(&mut writer, &convert(values, |v| v as i64), validity)?,
+                        DecimalStorage::Short => {
+                            write_values(&mut writer, &convert(values, |v| v as i16), validity)?
+                        }
+                        DecimalStorage::Word => {
+                            write_values(&mut writer, &convert(values, |v| v as i32), validity)?
+                        }
+                        DecimalStorage::Long => {
+                            write_values(&mut writer, &convert(values, |v| v as i64), validity)?
+                        }
                         DecimalStorage::Huge => write_values(
                             &mut writer,
                             &convert(values, |v| [v as u64, (v >> 64) as u64]),
@@ -703,25 +806,42 @@ macro_rules! fill_vector {
                         )?,
                     }
                 }
-                Data::Enum { storage, values, .. } => {
+                Data::Enum {
+                    storage, values, ..
+                } => {
                     let mut writer = vector.writer()?;
                     match storage {
-                        EnumStorage::U8 => write_values(&mut writer, &convert(values, |v| v as u8), validity)?,
-                        EnumStorage::U16 => write_values(&mut writer, &convert(values, |v| v as u16), validity)?,
+                        EnumStorage::U8 => {
+                            write_values(&mut writer, &convert(values, |v| v as u8), validity)?
+                        }
+                        EnumStorage::U16 => {
+                            write_values(&mut writer, &convert(values, |v| v as u16), validity)?
+                        }
                         EnumStorage::U32 => write_values(&mut writer, values, validity)?,
                     }
                 }
-                Data::Bytes { varchar: true, data, ranges } => {
+                Data::Bytes {
+                    varchar: true,
+                    data,
+                    ranges,
+                } => {
                     let mut vector = vector.cast::<UncheckedString>()?;
                     let mut writer = vector.writer()?;
                     check_len(writer.len(), ranges.len())?;
                     for (row, (start, len)) in ranges.iter().enumerate() {
                         let text = validity[row].then(|| &data[*start..start + len]);
                         // SAFETY: only valid UTF-8 is decoded into a VARCHAR column.
-                        writer.set(row, text.map(|text| unsafe { std::str::from_utf8_unchecked(text) }))?;
+                        writer.set(
+                            row,
+                            text.map(|text| unsafe { std::str::from_utf8_unchecked(text) }),
+                        )?;
                     }
                 }
-                Data::Bytes { varchar: false, data, ranges } => {
+                Data::Bytes {
+                    varchar: false,
+                    data,
+                    ranges,
+                } => {
                     let mut vector = vector.cast::<BlobValue>()?;
                     let mut writer = vector.writer()?;
                     check_len(writer.len(), ranges.len())?;
@@ -749,7 +869,11 @@ macro_rules! fill_vector {
                     let mut children = vector.children_mut().expect("LIST has a child");
                     fill_child(children.get_untyped_vector_at_mut(0)?, child)?;
                 }
-                Data::List { map: true, entries, child } => {
+                Data::List {
+                    map: true,
+                    entries,
+                    child,
+                } => {
                     let mut vector = vector.cast::<Map<Unknown, Unknown>>()?;
                     // SAFETY: every entry of the child is written below.
                     unsafe { vector.set_child_size(child.len())? };
@@ -757,7 +881,11 @@ macro_rules! fill_vector {
                     let mut children = vector.children_mut().expect("MAP has entries");
                     fill_child(children.get_untyped_vector_at_mut(0)?, child)?;
                 }
-                Data::Map { entries, keys, values } => {
+                Data::Map {
+                    entries,
+                    keys,
+                    values,
+                } => {
                     let mut vector = vector.cast::<Map<Unknown, Unknown>>()?;
                     // SAFETY: every entry of the child is written below.
                     unsafe { vector.set_child_size(keys.len())? };
@@ -765,14 +893,20 @@ macro_rules! fill_vector {
                     let mut children = vector.children_mut().expect("MAP has entries");
                     let mut entries = children.get_untyped_vector_at_mut(0)?;
                     write_validity(&mut entries.writer()?, &vec![true; keys.len()])?;
-                    let mut fields = entries.children_mut().expect("MAP entries have a key and a value");
+                    let mut fields = entries
+                        .children_mut()
+                        .expect("MAP entries have a key and a value");
                     fill_child(fields.get_untyped_vector_at_mut(0)?, keys)?;
                     fill_child(fields.get_untyped_vector_at_mut(1)?, values)?;
                 }
                 Data::Union { tags, children, .. } => {
                     write_validity(&mut vector.writer()?, validity)?;
                     let mut members = vector.children_mut().expect("UNION has a tag and members");
-                    write_values(&mut members.get_untyped_vector_at_mut(0)?.writer()?, tags, validity)?;
+                    write_values(
+                        &mut members.get_untyped_vector_at_mut(0)?.writer()?,
+                        tags,
+                        validity,
+                    )?;
                     for (index, child) in children.iter().enumerate() {
                         fill_child(members.get_untyped_vector_at_mut(index + 1)?, child)?;
                     }

@@ -6,7 +6,7 @@ timings include starting the CLI and loading the extension; the `load` benchmark
 The input files are generated once, by the first build, into the data directory.
 
 Example:
-    benchmark/run.py --build cpp=~/duckdb-avro-cpp/build/release/extension/avro/avro.duckdb_extension \\
+    benchmark/run.py --build cpp=~/duckdb-avro-cpp/build/release/avro.duckdb_extension \\
                      --build rust=build/release/avro.duckdb_extension
 """
 
@@ -127,8 +127,15 @@ def shell_quote(arg):
     return "'" + arg.replace("'", "'\"'\"'") + "'"
 
 
+def measurements(results, key, legacy_key):
+    if legacy_key in results:
+        return results[legacy_key] or []
+    return [m[key]["value"] for m in results.get("measurements", []) if key in m]
+
+
 def summarize(name, results):
-    times = results["times"]
+    times = measurements(results, "time_wall_clock", "times")
+    memory = measurements(results, "memory_peak_resident", "memory_usage_byte")
     median = statistics.median(times)
     stddev = statistics.stdev(times) if len(times) > 1 else 0.0
     return {
@@ -138,11 +145,16 @@ def summarize(name, results):
         "max": max(times),
         "stddev": stddev,
         "noisy": statistics.mean(times) > 0 and stddev / statistics.mean(times) > HIGH_VARIANCE,
+        "memory": statistics.median(memory) if memory else None,
     }
 
 
 def format_seconds(seconds):
     return f"{seconds * 1000:.1f} ms" if seconds < 1 else f"{seconds:.3f} s"
+
+
+def format_bytes(value):
+    return "n/a" if value is None else f"{value / 2**20:.0f} MiB"
 
 
 def report(rows, builds, path, metadata):
@@ -169,6 +181,17 @@ def report(rows, builds, path, metadata):
         ]
         ratios = [f"{by_build[name]['median'] / by_build[baseline]['median']:.2f}" for name, _ in builds[1:]]
         lines.append(f"| {benchmark} | " + " | ".join(cells + ratios) + " |")
+    lines += [
+        "",
+        "Peak resident memory (median):",
+        "",
+        "| benchmark | " + " | ".join(name for name, _ in builds) + " |",
+        "|---|" + "---|" * len(builds),
+    ]
+    for benchmark, summaries in rows:
+        by_build = {summary["build"]: summary for summary in summaries}
+        cells = [format_bytes(by_build[name]["memory"]) for name, _ in builds]
+        lines.append(f"| {benchmark} | " + " | ".join(cells) + " |")
     text = "\n".join(lines) + "\n"
     path.write_text(text)
     print()

@@ -37,7 +37,8 @@ impl Default for FieldId {
 impl FieldId {
     /// The id; a field that is only listed for the ids of its children has none, which is an error here.
     pub fn field_id(&self) -> Result<i32> {
-        self.id.ok_or_else(|| internal("Field id of the field is not set"))
+        self.id
+            .ok_or_else(|| internal("Field id of the field is not set"))
     }
 }
 
@@ -72,7 +73,13 @@ pub fn parse_field_ids(
     }
     let mut result = ChildFieldIds::default();
     let mut unique_field_ids = HashSet::new();
-    parse_children(context, input, &mut result, &mut unique_field_ids, &name_to_type)?;
+    parse_children(
+        context,
+        input,
+        &mut result,
+        &mut unique_field_ids,
+        &name_to_type,
+    )?;
     Ok(result)
 }
 
@@ -149,7 +156,8 @@ fn parse_children(
         let mut nullable_value = None;
         let mut has_child_field_ids = false;
         if child_type.id()? == LogicalTypeID::Struct {
-            for (nested_index, (nested_name, _)) in child_type.get_params()?.into_iter().enumerate() {
+            for (nested_index, (nested_name, _)) in child_type.get_params()?.into_iter().enumerate()
+            {
                 if nested_name == DUCKDB_FIELD_ID {
                     field_id_value = Some(child_value.get_child(nested_index)?);
                 } else if nested_name == DUCKDB_NULLABLE_ID {
@@ -164,15 +172,25 @@ fn parse_children(
 
         let mut field_id = FieldId::default();
         if let Some(field_id_value) = field_id_value {
-            let integer = LogicalType::create_from_id(context, LogicalTypeID::Integer, Parameters::None)?;
-            let id = non_null(field_id_value.cast(context, &integer)?.get::<i32>()?, &col_name)?;
+            let integer =
+                LogicalType::create_from_id(context, LogicalTypeID::Integer, Parameters::None)?;
+            let id = non_null(
+                field_id_value.cast(context, &integer)?.get::<i32>()?,
+                &col_name,
+            )?;
             if !unique_field_ids.insert(id) {
-                return Err(binder(format!("Duplicate field_id {id} found in FIELD_IDS")));
+                return Err(binder(format!(
+                    "Duplicate field_id {id} found in FIELD_IDS"
+                )));
             }
             field_id.id = Some(id);
             if let Some(nullable_value) = nullable_value {
-                let boolean = LogicalType::create_from_id(context, LogicalTypeID::Boolean, Parameters::None)?;
-                field_id.nullable = non_null(nullable_value.cast(context, &boolean)?.get::<bool>()?, &col_name)?;
+                let boolean =
+                    LogicalType::create_from_id(context, LogicalTypeID::Boolean, Parameters::None)?;
+                field_id.nullable = non_null(
+                    nullable_value.cast(context, &boolean)?.get::<bool>()?,
+                    &col_name,
+                )?;
             }
         }
         let entry = field_ids.ids.entry(col_name.clone()).or_insert(field_id);

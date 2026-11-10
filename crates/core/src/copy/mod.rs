@@ -12,7 +12,8 @@ use duckdb_neo::{
     column_data_collection::ColumnDataCollection,
     connection::Context,
     copy_function::{
-        CopyFunctionBuilder, CopyToBindInfo, CopyToFunctionCallbacks, CopyToStatistics, CopyToStatisticsCallbacks,
+        CopyFunctionBuilder, CopyToBindInfo, CopyToFunctionCallbacks, CopyToStatistics,
+        CopyToStatisticsCallbacks,
     },
     logical_type::LogicalTypeID,
     value::Value,
@@ -34,7 +35,9 @@ struct CopyOptions {
 }
 
 fn is_bare(value: &Value) -> Result<bool> {
-    Ok(!value.is_null()? && value.logical_type()?.id()? == LogicalTypeID::Boolean && value.get::<bool>()? == Some(true))
+    Ok(!value.is_null()?
+        && value.logical_type()?.id()? == LogicalTypeID::Boolean
+        && value.get::<bool>()? == Some(true))
 }
 
 impl CopyOptions {
@@ -52,15 +55,19 @@ impl CopyOptions {
     }
 
     fn find(&mut self, name: &str) -> Option<&Value> {
-        let index = self.options.iter().position(|(option, _)| option.eq_ignore_ascii_case(name))?;
+        let index = self
+            .options
+            .iter()
+            .position(|(option, _)| option.eq_ignore_ascii_case(name))?;
         self.recognized[index] = true;
         Some(&self.options[index].1)
     }
 
-    /// The value of an option that requires one; an option given without a value reads as `true`.
     fn find_with_value(&mut self, name: &str) -> Result<Option<&Value>> {
         match self.find(name) {
-            Some(value) if is_bare(value)? => Err(invalid_input(format!("{name} can not be provided without a value"))),
+            Some(value) if is_bare(value)? => Err(invalid_input(format!(
+                "{name} can not be provided without a value"
+            ))),
             value => Ok(value),
         }
     }
@@ -115,8 +122,9 @@ fn parse_codec(options: &mut CopyOptions) -> Result<String> {
     let Some(value) = options.find_with_value("CODEC")? else {
         return Ok(String::new());
     };
-    let codec = varchar_option(value)?
-        .ok_or_else(|| invalid_input("'CODEC' is expected to be provided as VARCHAR (e.g. 'deflate', 'null')"))?;
+    let codec = varchar_option(value)?.ok_or_else(|| {
+        invalid_input("'CODEC' is expected to be provided as VARCHAR (e.g. 'deflate', 'null')")
+    })?;
     Ok(codec.to_ascii_lowercase())
 }
 
@@ -157,8 +165,9 @@ fn bind(context: &Context, bind_info: &CopyToBindInfo) -> Result<AvroCopyBindDat
             LogicalTypeID::Boolean => value.get::<bool>()?,
             _ => None,
         };
-        generator.sanitize_field_names =
-            sanitize.ok_or_else(|| invalid_input("SANITIZE_FIELD_NAMES requires a non-NULL BOOLEAN value"))?;
+        generator.sanitize_field_names = sanitize.ok_or_else(|| {
+            invalid_input("SANITIZE_FIELD_NAMES requires a non-NULL BOOLEAN value")
+        })?;
     }
     let schema_json = generator.generate()?;
 
@@ -207,7 +216,10 @@ fn write_rows(
         flatten_chunk(&mut chunk)?;
         let mut readers = Vec::with_capacity(columns.len());
         for (index, column) in columns.iter().enumerate() {
-            readers.push(ColumnReader::new(column, chunk.get_vector_at::<Unknown>(index)?)?);
+            readers.push(ColumnReader::new(
+                column,
+                chunk.get_vector_at::<Unknown>(index)?,
+            )?);
         }
         let row_count = chunk.row_count()?;
         for index in 0..row_count {
@@ -236,7 +248,12 @@ impl CopyToFunctionCallbacks for AvroCopy {
         bind(context, bind_info)
     }
 
-    fn init(&self, context: &Context, bind_data: &Self::BindData, file_path: &str) -> Result<Self::InitData> {
+    fn init(
+        &self,
+        context: &Context,
+        bind_data: &Self::BindData,
+        file_path: &str,
+    ) -> Result<Self::InitData> {
         let writer = AvroFileWriter::create(
             context,
             file_path,
@@ -272,7 +289,12 @@ impl CopyToFunctionCallbacks for AvroCopy {
         write_rows(context, &bind_data.columns, &mut writer, input)
     }
 
-    fn finalize(&self, _context: &Context, _bind_data: &Self::BindData, init_data: &Self::InitData) -> Result<()> {
+    fn finalize(
+        &self,
+        _context: &Context,
+        _bind_data: &Self::BindData,
+        init_data: &Self::InitData,
+    ) -> Result<()> {
         // Every block is already written; closing commits the file on stores that only publish it on close.
         init_data.lock()?.close()
     }

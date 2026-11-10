@@ -46,7 +46,10 @@ impl FileArgument {
         for (index, (name, _)) in file_type.get_params()?.into_iter().enumerate() {
             let child = file.get_child(index)?;
             if name == FILE_PATH_FIELD {
-                if path.is_none() && !child.is_null()? && child.logical_type()?.id()? == LogicalTypeID::Varchar {
+                if path.is_none()
+                    && !child.is_null()?
+                    && child.logical_type()?.id()? == LogicalTypeID::Varchar
+                {
                     path = child.get::<String>()?;
                 }
                 continue;
@@ -68,12 +71,15 @@ impl FileArgument {
 /// Reads the whole file into memory, through the external file cache.
 pub fn read_file(context: &Context, file: &FileArgument) -> Result<Vec<u8>> {
     let fs = FileSystem::new(context)?;
-    let mut builder = FileBuilder::new(&fs, &file.path)?.read().external_file_cache();
+    let mut builder = FileBuilder::new(&fs, &file.path)?
+        .read()
+        .external_file_cache();
     for (name, value) in &file.options {
         builder = builder.set_value(name, value)?;
     }
     let handle = builder.open()?;
-    let size = usize::try_from(handle.size()?).map_err(|_| invalid_input("Avro file is too large"))?;
+    let size =
+        usize::try_from(handle.size()?).map_err(|_| invalid_input("Avro file is too large"))?;
     let mut buffer = vec![0; size];
     if size > 0 {
         handle.read_exact_at(0, &mut buffer)?;

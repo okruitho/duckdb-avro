@@ -3,14 +3,16 @@
 use std::sync::Mutex;
 
 use duckdb_neo::{
-    Result,
+    Parameters, Result,
     bind_arguments::BindArgument,
     connection::Context,
     data_chunk::DataChunkRef,
     logical_type::{LogicalType, LogicalTypeID},
     signature::{FunctionParameter, SignatureBuilder},
-    table_function::{BindFunctionHandle, ExecColumnInfo, InitColumnData, TableFunctionBuilder, TableFunctionCallbacks},
-    Parameters,
+    table_function::{
+        BindFunctionHandle, ExecColumnInfo, InitColumnData, TableFunctionBuilder,
+        TableFunctionCallbacks,
+    },
 };
 
 use crate::avro::container::FileInfo;
@@ -31,8 +33,14 @@ impl TableFunctionCallbacks for AvroMetadata {
     type LocalState = ();
     type GlobalState = MetadataState;
 
-    fn bind(&self, context: &Context, arguments: Vec<BindArgument>, bind_handle: BindFunctionHandle<'_>) -> Result<String> {
-        let varchar = LogicalType::create_from_id(context, LogicalTypeID::Varchar, Parameters::None)?;
+    fn bind(
+        &self,
+        context: &Context,
+        arguments: Vec<BindArgument>,
+        bind_handle: BindFunctionHandle<'_>,
+    ) -> Result<String> {
+        let varchar =
+            LogicalType::create_from_id(context, LogicalTypeID::Varchar, Parameters::None)?;
         bind_handle.add_result_column("key", &varchar)?;
         bind_handle.add_result_column("value", &varchar)?;
         arguments
@@ -80,7 +88,10 @@ impl TableFunctionCallbacks for AvroMetadata {
         let Some(state) = global_state else {
             return Ok(());
         };
-        let mut offset = state.offset.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut offset = state
+            .offset
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let count = (state.entries.len() - *offset).min(output.capacity()?);
         let rows = &state.entries[*offset..*offset + count];
         for (index, column) in (0..output.col_count()).zip([0, 1]) {
@@ -88,7 +99,14 @@ impl TableFunctionCallbacks for AvroMetadata {
             vector.set_size(count)?;
             let mut writer = vector.writer()?;
             for (row, (key, value)) in rows.iter().enumerate() {
-                writer.set(row, Some(if column == 0 { key.as_str() } else { value.as_str() }))?;
+                writer.set(
+                    row,
+                    Some(if column == 0 {
+                        key.as_str()
+                    } else {
+                        value.as_str()
+                    }),
+                )?;
             }
         }
         *offset += count;

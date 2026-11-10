@@ -54,7 +54,10 @@ impl AvroFileWriter {
         metadata: &[(String, String)],
     ) -> Result<Self> {
         let file_system = FileSystem::new(context)?;
-        let file = FileBuilder::new(&file_system, path)?.write().create_new().open()?;
+        let file = FileBuilder::new(&file_system, path)?
+            .write()
+            .create_new()
+            .open()?;
         let mut writer = Self {
             file,
             codec,
@@ -67,7 +70,13 @@ impl AvroFileWriter {
             bytes_written: 0,
             row_count: 0,
         };
-        write_header(&mut writer.output, schema_json, codec, metadata, &writer.sync);
+        write_header(
+            &mut writer.output,
+            schema_json,
+            codec,
+            metadata,
+            &writer.sync,
+        );
         writer.write_output()?;
         Ok(writer)
     }

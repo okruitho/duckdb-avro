@@ -5,15 +5,18 @@ use duckdb_neo::{
     data_chunk::{ChildrenMut, DataChunkRef},
     logical_type::{LogicalType, LogicalTypeID},
     types::{
-        BlobValue, DateValue, DecimalSignature, HugeDecimal, HugeInt, List, ListIndex, LongDecimal, Map, ShortDecimal, Struct, TimeValue,
-        TimestampMsValue, TimestampNsValue, TimestampTzNsValue, TimestampTzValue, TimestampValue, UncheckedString,
-        UuidValueRaw, WordDecimal,
+        BlobValue, DateValue, DecimalSignature, HugeDecimal, HugeInt, List, ListIndex, LongDecimal,
+        Map, ShortDecimal, Struct, TimeValue, TimestampMsValue, TimestampNsValue,
+        TimestampTzNsValue, TimestampTzValue, TimestampValue, UncheckedString, UuidValueRaw,
+        WordDecimal,
     },
     vector::{Unknown, Vector, VectorElement, VectorReader},
 };
 
 use super::schema::{EMPTY_STRUCT_MARKER, decimal_fixed_size, struct_children, type_param};
-use crate::avro::binary::{write_boolean, write_bytes, write_double, write_float, write_int, write_long};
+use crate::avro::binary::{
+    write_boolean, write_bytes, write_double, write_float, write_int, write_long,
+};
 use crate::avro::schema::{Node, NodeId, Schema};
 use crate::error::{internal, invalid_input, out_of_range};
 
@@ -37,10 +40,16 @@ enum EncoderKind {
     TimestampTz,
     TimestampTzNs,
     Uuid,
-    Decimal { width: u8, size: usize },
+    Decimal {
+        width: u8,
+        size: usize,
+    },
     Struct(Vec<(usize, ColumnEncoder)>),
     List(Box<ColumnEncoder>),
-    Map { key: Box<ColumnEncoder>, value: Box<ColumnEncoder> },
+    Map {
+        key: Box<ColumnEncoder>,
+        value: Box<ColumnEncoder>,
+    },
 }
 
 /// How the values of one column (or nested field) are encoded: its Avro type is nullable when it is the union
@@ -106,7 +115,10 @@ impl ColumnEncoder {
             LogicalTypeID::TimestampTzNs => EncoderKind::TimestampTzNs,
             LogicalTypeID::Uuid => EncoderKind::Uuid,
             LogicalTypeID::Decimal => {
-                let Node::Fixed { size: fixed_size, .. } = schema.node(node) else {
+                let Node::Fixed {
+                    size: fixed_size, ..
+                } = schema.node(node)
+                else {
                     return Err(schema_mismatch(logical_type));
                 };
                 let width = DecimalSignature::from_logical_type(logical_type)?.width;
@@ -132,7 +144,10 @@ impl ColumnEncoder {
                     .into_iter()
                     .zip(fields)
                     .map(|((index, (_, child_type)), field)| {
-                        Ok((index, ColumnEncoder::new(&child_type, schema, field.schema)?))
+                        Ok((
+                            index,
+                            ColumnEncoder::new(&child_type, schema, field.schema)?,
+                        ))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 EncoderKind::Struct(encoders)
@@ -158,8 +173,16 @@ impl ColumnEncoder {
                     return Err(schema_mismatch(logical_type));
                 };
                 EncoderKind::Map {
-                    key: Box::new(ColumnEncoder::new(&type_param(logical_type, 0)?, schema, key.schema)?),
-                    value: Box::new(ColumnEncoder::new(&type_param(logical_type, 1)?, schema, value.schema)?),
+                    key: Box::new(ColumnEncoder::new(
+                        &type_param(logical_type, 0)?,
+                        schema,
+                        key.schema,
+                    )?),
+                    value: Box::new(ColumnEncoder::new(
+                        &type_param(logical_type, 1)?,
+                        schema,
+                        value.schema,
+                    )?),
                 }
             }
             _ => return Err(schema_mismatch(logical_type)),
@@ -261,16 +284,18 @@ where
     Ok(Some(unsafe { *rows.as_ptr().add(physical) }))
 }
 
-/// Reads a 16 byte integer as two halves: DuckDB aligns them to 8 bytes only, so they cannot be read as `i128`.
 fn huge_int<T: VectorElement>(values: &VectorReader<'_, T>, row: usize) -> Result<Option<i128>> {
     if values.is_null(row)? {
         return Ok(None);
     }
     let physical = values.selection().index(row);
+    // DuckDB aligns 16 byte integers to 8 bytes only, so they are read as HugeInt, not i128.
     // SAFETY: the row is in bounds and not NULL, and UUID and wide DECIMAL vectors store a 16 byte integer with the
     // layout of HugeInt in every slot.
     let value = unsafe { *values.as_ptr().cast::<HugeInt>().add(physical) };
-    Ok(Some((i128::from(value.upper) << 64) | i128::from(value.lower)))
+    Ok(Some(
+        (i128::from(value.upper) << 64) | i128::from(value.lower),
+    ))
 }
 
 fn write_decimal(out: &mut Vec<u8>, value: i128, size: usize) -> usize {
@@ -423,18 +448,22 @@ impl<'a> ColumnReader<'a> {
                 out.extend_from_slice(&UuidValueRaw(value).to_bytes());
                 Ok(16)
             }),
-            Values::ShortDecimal(values, size) => self.write(values.get(row)?, out, |out, value| {
-                Ok(write_decimal(out, value.0.into(), *size))
-            }),
+            Values::ShortDecimal(values, size) => {
+                self.write(values.get(row)?, out, |out, value| {
+                    Ok(write_decimal(out, value.0.into(), *size))
+                })
+            }
             Values::WordDecimal(values, size) => self.write(values.get(row)?, out, |out, value| {
                 Ok(write_decimal(out, value.0.into(), *size))
             }),
             Values::LongDecimal(values, size) => self.write(values.get(row)?, out, |out, value| {
                 Ok(write_decimal(out, value.0.into(), *size))
             }),
-            Values::HugeDecimal(values, size) => self.write(huge_int(values, row)?, out, |out, value| {
-                Ok(write_decimal(out, value, *size))
-            }),
+            Values::HugeDecimal(values, size) => {
+                self.write(huge_int(values, row)?, out, |out, value| {
+                    Ok(write_decimal(out, value, *size))
+                })
+            }
             Values::Struct { rows, fields } => self.write(rows.get(row)?, out, |out, ()| {
                 let mut size = 1;
                 for field in fields {
@@ -442,18 +471,20 @@ impl<'a> ColumnReader<'a> {
                 }
                 Ok(size)
             }),
-            Values::List { rows, items } => self.write(list_entry(rows, row)?, out, |out, entry| {
-                let (offset, length) = entry_range(entry)?;
-                if length > 0 {
-                    write_long(out, entry.length() as i64);
-                }
-                let mut size = 1;
-                for item in offset..offset + length {
-                    size += items.encode(item, out)?;
-                }
-                write_long(out, 0);
-                Ok(size)
-            }),
+            Values::List { rows, items } => {
+                self.write(list_entry(rows, row)?, out, |out, entry| {
+                    let (offset, length) = entry_range(entry)?;
+                    if length > 0 {
+                        write_long(out, entry.length() as i64);
+                    }
+                    let mut size = 1;
+                    for item in offset..offset + length {
+                        size += items.encode(item, out)?;
+                    }
+                    write_long(out, 0);
+                    Ok(size)
+                })
+            }
             Values::Map {
                 rows,
                 entries,
@@ -479,8 +510,10 @@ impl<'a> ColumnReader<'a> {
 }
 
 fn entry_range(entry: ListIndex) -> Result<(usize, usize)> {
-    let offset = usize::try_from(entry.offset()).map_err(|_| internal("LIST offset out of range"))?;
-    let length = usize::try_from(entry.length()).map_err(|_| internal("LIST length out of range"))?;
+    let offset =
+        usize::try_from(entry.offset()).map_err(|_| internal("LIST offset out of range"))?;
+    let length =
+        usize::try_from(entry.length()).map_err(|_| internal("LIST length out of range"))?;
     offset
         .checked_add(length)
         .ok_or_else(|| internal("LIST entry out of range"))?;
@@ -488,5 +521,7 @@ fn entry_range(entry: ListIndex) -> Result<(usize, usize)> {
 }
 
 fn non_nullable_error(type_name: &str) -> duckdb_neo::Error {
-    invalid_input(format!("Cannot insert NULL to non-nullable field of type {type_name}"))
+    invalid_input(format!(
+        "Cannot insert NULL to non-nullable field of type {type_name}"
+    ))
 }

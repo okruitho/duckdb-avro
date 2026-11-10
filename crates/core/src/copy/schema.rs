@@ -17,8 +17,8 @@ pub const EMPTY_STRUCT_MARKER: &str = "__duckdb_empty_struct_marker";
 
 /// Bits needed for the largest unscaled value of each precision, before the sign bit.
 const DECIMAL_BITS_REQUIRED: [u32; 39] = [
-    0, 4, 7, 10, 14, 17, 20, 24, 27, 30, 34, 37, 40, 44, 47, 50, 54, 57, 60, 64, 67, 70, 74, 77, 80, 84, 87, 90, 94,
-    97, 100, 103, 107, 110, 113, 117, 120, 123, 127,
+    0, 4, 7, 10, 14, 17, 20, 24, 27, 30, 34, 37, 40, 44, 47, 50, 54, 57, 60, 64, 67, 70, 74, 77,
+    80, 84, 87, 90, 94, 97, 100, 103, 107, 110, 113, 117, 120, 123, 127,
 ];
 
 /// The size of the Avro fixed that holds every value of a DECIMAL of `width` digits, sign included.
@@ -82,14 +82,19 @@ fn temporal_logical_type(id: LogicalTypeID) -> Option<&'static str> {
     match id {
         LogicalTypeID::Date => Some("date"),
         LogicalTypeID::Time => Some("time-micros"),
-        LogicalTypeID::Timestamp | LogicalTypeID::TimestampMs | LogicalTypeID::TimestampTz => Some("timestamp-micros"),
+        LogicalTypeID::Timestamp | LogicalTypeID::TimestampMs | LogicalTypeID::TimestampTz => {
+            Some("timestamp-micros")
+        }
         LogicalTypeID::TimestampNs | LogicalTypeID::TimestampTzNs => Some("timestamp-nanos"),
         _ => None,
     }
 }
 
 fn is_named(id: LogicalTypeID) -> bool {
-    matches!(id, LogicalTypeID::Struct | LogicalTypeID::Uuid | LogicalTypeID::Decimal)
+    matches!(
+        id,
+        LogicalTypeID::Struct | LogicalTypeID::Uuid | LogicalTypeID::Decimal
+    )
 }
 
 fn verify_avro_name(name: &str) -> Result<()> {
@@ -103,8 +108,8 @@ fn verify_avro_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Wraps a type in a union with null; null itself stays as is, since a union cannot hold it twice.
 fn make_nullable(avro_type: Json) -> Json {
+    // A union cannot hold null twice.
     if avro_type == "null" {
         return avro_type;
     }
@@ -149,7 +154,12 @@ impl<'a> SchemaGenerator<'a> {
         let mut field_names = HashMap::new();
         let mut fields = Vec::with_capacity(self.names.len());
         for (name, logical_type) in self.names.iter().zip(self.types) {
-            fields.push(self.struct_field(name, logical_type, field_ids.find(name), &mut field_names)?);
+            fields.push(self.struct_field(
+                name,
+                logical_type,
+                field_ids.find(name),
+                &mut field_names,
+            )?);
         }
         let root = json!({"type": "record", "name": root_name, "fields": fields});
         Ok(root.to_string())
@@ -172,7 +182,12 @@ impl<'a> SchemaGenerator<'a> {
         Ok(name)
     }
 
-    fn set_name(&mut self, object: &mut Map<String, Json>, base: &str, preset: Option<&str>) -> Result<()> {
+    fn set_name(
+        &mut self,
+        object: &mut Map<String, Json>,
+        base: &str,
+        preset: Option<&str>,
+    ) -> Result<()> {
         let name = match preset {
             Some(preset) => {
                 verify_avro_name(preset)?;
@@ -197,7 +212,12 @@ impl<'a> SchemaGenerator<'a> {
             if name == EMPTY_STRUCT_MARKER {
                 continue;
             }
-            fields.push(self.struct_field(name, child_type, child_field_id(field_id, name), &mut field_names)?);
+            fields.push(self.struct_field(
+                name,
+                child_type,
+                child_field_id(field_id, name),
+                &mut field_names,
+            )?);
         }
         let mut object = Map::new();
         object.insert("type".to_owned(), Json::from("record"));
@@ -217,15 +237,20 @@ impl<'a> SchemaGenerator<'a> {
         let mut object = Map::new();
         object.insert("type".to_owned(), Json::from(avro_type));
         match id {
-            LogicalTypeID::Struct => return self.record(&struct_children(logical_type)?, field_id, preset_name),
+            LogicalTypeID::Struct => {
+                return self.record(&struct_children(logical_type)?, field_id, preset_name);
+            }
             LogicalTypeID::List => {
                 let child_type = type_param(logical_type, 0)?;
                 let element_field_id = child_field_id(field_id, "list");
                 let element_name = match element_field_id {
-                    Some(element) if child_type.id()? == LogicalTypeID::Struct => Some(format!("r{}", element.field_id()?)),
+                    Some(element) if child_type.id()? == LogicalTypeID::Struct => {
+                        Some(format!("r{}", element.field_id()?))
+                    }
                     _ => None,
                 };
-                let mut items = self.json_type(&child_type, element_field_id, element_name.as_deref())?;
+                let mut items =
+                    self.json_type(&child_type, element_field_id, element_name.as_deref())?;
                 if element_field_id.is_none_or(|element| element.nullable) {
                     items = make_nullable(items);
                 }
@@ -240,8 +265,13 @@ impl<'a> SchemaGenerator<'a> {
                     ("key".to_owned(), type_param(logical_type, 0)?),
                     ("value".to_owned(), type_param(logical_type, 1)?),
                 ];
-                let entries_name = match (child_field_id(field_id, "key"), child_field_id(field_id, "value")) {
-                    (Some(key), Some(value)) => Some(format!("k{}_v{}", key.field_id()?, value.field_id()?)),
+                let entries_name = match (
+                    child_field_id(field_id, "key"),
+                    child_field_id(field_id, "value"),
+                ) {
+                    (Some(key), Some(value)) => {
+                        Some(format!("k{}_v{}", key.field_id()?, value.field_id()?))
+                    }
                     _ => None,
                 };
                 let items = self.record(&entries, field_id, entries_name.as_deref())?;
@@ -252,7 +282,10 @@ impl<'a> SchemaGenerator<'a> {
                 object.insert("logicalType".to_owned(), Json::from("decimal"));
                 object.insert("scale".to_owned(), Json::from(signature.scale));
                 object.insert("precision".to_owned(), Json::from(signature.width));
-                object.insert("size".to_owned(), Json::from(decimal_fixed_size(signature.width)?));
+                object.insert(
+                    "size".to_owned(),
+                    Json::from(decimal_fixed_size(signature.width)?),
+                );
             }
             LogicalTypeID::Uuid => {
                 object.insert("logicalType".to_owned(), Json::from("uuid"));
@@ -261,7 +294,10 @@ impl<'a> SchemaGenerator<'a> {
             _ => match temporal_logical_type(id) {
                 Some(temporal) => {
                     object.insert("logicalType".to_owned(), Json::from(temporal));
-                    if matches!(id, LogicalTypeID::TimestampTz | LogicalTypeID::TimestampTzNs) {
+                    if matches!(
+                        id,
+                        LogicalTypeID::TimestampTz | LogicalTypeID::TimestampTzNs
+                    ) {
                         object.insert("adjust-to-utc".to_owned(), Json::from(true));
                     }
                 }
@@ -274,7 +310,11 @@ impl<'a> SchemaGenerator<'a> {
         Ok(Json::Object(object))
     }
 
-    fn sanitize_field_name(&self, name: &str, field_names: &mut HashMap<String, String>) -> Result<String> {
+    fn sanitize_field_name(
+        &self,
+        name: &str,
+        field_names: &mut HashMap<String, String>,
+    ) -> Result<String> {
         if !self.sanitize_field_names {
             return Ok(name.to_owned());
         }
@@ -311,7 +351,9 @@ impl<'a> SchemaGenerator<'a> {
     ) -> Result<Json> {
         let output_name = self.sanitize_field_name(name, field_names)?;
         let schema_name = match field_id {
-            Some(field_id) if logical_type.id()? == LogicalTypeID::Struct => format!("r{}", field_id.field_id()?),
+            Some(field_id) if logical_type.id()? == LogicalTypeID::Struct => {
+                format!("r{}", field_id.field_id()?)
+            }
             _ => output_name.clone(),
         };
         let mut field_type = self.json_type(logical_type, field_id, Some(&schema_name))?;

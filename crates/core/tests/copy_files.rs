@@ -13,7 +13,9 @@ use duckdb_neo::{
 };
 
 fn connect() -> Result<Connection> {
-    let conn = Environment::new()?.open(StorageLocation::InMemory)?.connect()?;
+    let conn = Environment::new()?
+        .open(StorageLocation::InMemory)?
+        .connect()?;
     avro_core::copy::copy_function().register(&conn)?;
     Ok(conn)
 }
@@ -36,7 +38,9 @@ fn rows(conn: &Connection, sql: &str) -> Result<Vec<Vec<String>>> {
         for row in 0..chunk.row_count()? {
             let mut values = Vec::new();
             for column in 0..chunk.col_count() {
-                let value = chunk.get_vector_at::<Unknown>(column)?.get_value_slow(row)?;
+                let value = chunk
+                    .get_vector_at::<Unknown>(column)?
+                    .get_value_slow(row)?;
                 values.push(if value.is_null()? {
                     "NULL".to_owned()
                 } else {
@@ -70,7 +74,10 @@ fn blocks(path: &str) -> Vec<(u64, Vec<u8>)> {
         .iter()
         .map(|block| {
             let mut scratch = Vec::new();
-            let decoded = info.decode_block(&data, block, &mut scratch).unwrap().to_vec();
+            let decoded = info
+                .decode_block(&data, block, &mut scratch)
+                .unwrap()
+                .to_vec();
             (block.object_count, decoded)
         })
         .collect()
@@ -82,9 +89,24 @@ fn written_statistics_match_file_sizes() -> Result<()> {
     let dir = test_dir("stats");
     let cases = [
         ("SELECT range AS a FROM range(100)", "stats.avro", 100, 395),
-        ("SELECT a FROM (SELECT 1 a) WHERE 1 = 0", "empty.avro", 0, 138),
-        ("SELECT range AS a FROM range(10000)", "big.avro", 10000, 31983),
-        ("SELECT range AS a, range::VARCHAR AS b FROM range(50)", "cols.avro", 50, 495),
+        (
+            "SELECT a FROM (SELECT 1 a) WHERE 1 = 0",
+            "empty.avro",
+            0,
+            138,
+        ),
+        (
+            "SELECT range AS a FROM range(10000)",
+            "big.avro",
+            10000,
+            31983,
+        ),
+        (
+            "SELECT range AS a, range::VARCHAR AS b FROM range(50)",
+            "cols.avro",
+            50,
+            495,
+        ),
     ];
     for (query, file, count, size) in cases {
         let target = path(&dir, file);
@@ -96,24 +118,39 @@ fn written_statistics_match_file_sizes() -> Result<()> {
         assert!(stats[0][0].ends_with(file), "{:?}", stats[0]);
         assert_eq!(stats[0][1], count.to_string());
         assert_eq!(stats[0][2], size.to_string(), "{file}");
-        assert_eq!(std::fs::metadata(&target).unwrap().len(), size as u64, "{file}");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().len(),
+            size as u64,
+            "{file}"
+        );
         let objects: u64 = blocks(&target).iter().map(|(count, _)| count).sum();
         assert_eq!(objects, count);
     }
     Ok(())
 }
 
-
-fn copy_to(conn: &Connection, dir: &std::path::Path, file: &str, query: &str, options: &str) -> Result<String> {
+fn copy_to(
+    conn: &Connection,
+    dir: &std::path::Path,
+    file: &str,
+    query: &str,
+    options: &str,
+) -> Result<String> {
     let target = path(dir, file);
     let separator = if options.is_empty() { "" } else { ", " };
-    copy(conn, &format!("COPY ({query}) TO '{target}' (FORMAT AVRO{separator}{options})"))?;
+    copy(
+        conn,
+        &format!("COPY ({query}) TO '{target}' (FORMAT AVRO{separator}{options})"),
+    )?;
     Ok(target)
 }
 
 /// The data of all blocks of a file, concatenated.
 fn data(path: &str) -> Vec<u8> {
-    blocks(path).into_iter().flat_map(|(_, data)| data).collect()
+    blocks(path)
+        .into_iter()
+        .flat_map(|(_, data)| data)
+        .collect()
 }
 
 fn bytes(write: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
@@ -218,7 +255,10 @@ fn null_type_is_never_wrapped_in_a_union() -> Result<()> {
     }
     let schema: serde_json::Value = serde_json::from_str(&schema_json(&with_ids)).unwrap();
     assert_eq!(schema["fields"][2]["type"][1]["name"], "r102");
-    assert_eq!(schema["fields"][2]["type"][1]["fields"][0]["field-id"], 1000);
+    assert_eq!(
+        schema["fields"][2]["type"][1]["fields"][0]["field-id"],
+        1000
+    );
 
     let expected = bytes(|out| {
         // id 1, u, s {u, v 42}, a [NULL, NULL], m {a: NULL}
@@ -283,8 +323,17 @@ fn sanitized_field_names() -> Result<()> {
         "SELECT 1 AS \"a b\", 2 AS \"1col\", 3 AS \"a-b\", 4 AS \"é\", 5 AS valid_1",
         "SANITIZE_FIELD_NAMES true",
     )?;
-    assert_eq!(field_names(&target), ["a_x20b", "_1col", "a_x2Db", "_xC3_xA9", "valid_1"]);
-    let target = copy_to(&conn, &dir, "bare.avro", "SELECT 1 AS \"a b\"", "SANITIZE_FIELD_NAMES")?;
+    assert_eq!(
+        field_names(&target),
+        ["a_x20b", "_1col", "a_x2Db", "_xC3_xA9", "valid_1"]
+    );
+    let target = copy_to(
+        &conn,
+        &dir,
+        "bare.avro",
+        "SELECT 1 AS \"a b\"",
+        "SANITIZE_FIELD_NAMES",
+    )?;
     assert_eq!(field_names(&target), ["a_x20b"]);
 
     let field_ids = |target: &str| -> Vec<i64> {
@@ -292,7 +341,13 @@ fn sanitized_field_names() -> Result<()> {
         schema
             .split("\"field-id\":")
             .skip(1)
-            .map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap())
+            .map(|rest| {
+                rest.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
             .collect()
     };
     let target = copy_to(
@@ -376,7 +431,10 @@ fn values_of_every_type() -> Result<()> {
             write_long(out, micros_or_nanos);
         }
         out.push(PRESENT);
-        out.extend([0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00]);
+        out.extend([
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ]);
         out.push(PRESENT);
         out.extend((-130_i16).to_be_bytes());
         out.push(PRESENT);
@@ -512,10 +570,19 @@ fn codecs_compress_the_same_blocks() -> Result<()> {
         ("lzma", Codec::Lzma),
         ("", Codec::Null),
     ] {
-        let target = copy_to(&conn, &dir, &format!("{option}.avro"), query, &format!("CODEC '{option}'"))?;
+        let target = copy_to(
+            &conn,
+            &dir,
+            &format!("{option}.avro"),
+            query,
+            &format!("CODEC '{option}'"),
+        )?;
         let (_, info) = read_file(&target);
         assert_eq!(info.codec, codec);
-        assert_eq!(info.metadata[0], ("avro.codec".to_owned(), codec.name().as_bytes().to_vec()));
+        assert_eq!(
+            info.metadata[0],
+            ("avro.codec".to_owned(), codec.name().as_bytes().to_vec())
+        );
         assert_eq!(blocks(&target), plain_blocks, "{option}");
     }
     Ok(())
@@ -533,9 +600,19 @@ fn metadata_follows_the_schema() -> Result<()> {
         "METADATA {'key': 'value', 'key2': 42, 'key3': [1, 2], 'key4': NULL}, ROOT_NAME 'test'",
     )?;
     let (_, info) = read_file(&target);
-    let keys = info.metadata.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>();
-    assert_eq!(keys, ["avro.codec", "avro.schema", "key", "key2", "key3", "key4"]);
-    let values = info.metadata[2..].iter().map(|(_, value)| value.as_slice()).collect::<Vec<_>>();
+    let keys = info
+        .metadata
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        ["avro.codec", "avro.schema", "key", "key2", "key3", "key4"]
+    );
+    let values = info.metadata[2..]
+        .iter()
+        .map(|(_, value)| value.as_slice())
+        .collect::<Vec<_>>();
     assert_eq!(values, [b"value".as_slice(), b"42", b"[1, 2]", b"NULL"]);
     Ok(())
 }
@@ -554,12 +631,18 @@ fn every_row_is_kept_across_block_boundaries() -> Result<()> {
             "",
         )?;
         let file_blocks = blocks(&target);
-        assert_eq!(file_blocks.iter().map(|(count, _)| count).sum::<u64>(), 8192);
+        assert_eq!(
+            file_blocks.iter().map(|(count, _)| count).sum::<u64>(),
+            8192
+        );
         let row = bytes(|out| {
             out.push(PRESENT);
             write_bytes(out, "x".repeat(length).as_bytes());
         });
-        let all = file_blocks.into_iter().flat_map(|(_, data)| data).collect::<Vec<_>>();
+        let all = file_blocks
+            .into_iter()
+            .flat_map(|(_, data)| data)
+            .collect::<Vec<_>>();
         assert_eq!(all, row.repeat(8192));
     }
     let partitioned = dir.join("partitioned");
@@ -575,7 +658,10 @@ fn every_row_is_kept_across_block_boundaries() -> Result<()> {
     for partition in std::fs::read_dir(&partitioned).unwrap() {
         for file in std::fs::read_dir(partition.unwrap().path()).unwrap() {
             let file = file.unwrap().path();
-            objects += blocks(file.to_str().unwrap()).iter().map(|(count, _)| count).sum::<u64>();
+            objects += blocks(file.to_str().unwrap())
+                .iter()
+                .map(|(count, _)| count)
+                .sum::<u64>();
             files += 1;
         }
     }
@@ -589,13 +675,49 @@ fn block_sizes_follow_the_row_size_estimates() -> Result<()> {
     let conn = connect()?;
     let dir = test_dir("block_sizes");
     // BIGINT rows are estimated at 8 bytes and take at most 3, so the buffer always has room for them.
-    let target = copy_to(&conn, &dir, "one_chunk.avro", "SELECT range AS a FROM range(2048)", "")?;
-    assert_eq!(blocks(&target).iter().map(|(count, _)| *count).collect::<Vec<_>>(), [2048]);
+    let target = copy_to(
+        &conn,
+        &dir,
+        "one_chunk.avro",
+        "SELECT range AS a FROM range(2048)",
+        "",
+    )?;
+    assert_eq!(
+        blocks(&target)
+            .iter()
+            .map(|(count, _)| *count)
+            .collect::<Vec<_>>(),
+        [2048]
+    );
     // A string of 125 bytes takes 128 with its union branch and length: the buffer grows to 128, 256, 512 bytes, ...
-    let target = copy_to(&conn, &dir, "fits.avro", "SELECT repeat('x', 125) AS s FROM range(10)", "")?;
-    assert_eq!(blocks(&target).iter().map(|(count, _)| *count).collect::<Vec<_>>(), [10]);
+    let target = copy_to(
+        &conn,
+        &dir,
+        "fits.avro",
+        "SELECT repeat('x', 125) AS s FROM range(10)",
+        "",
+    )?;
+    assert_eq!(
+        blocks(&target)
+            .iter()
+            .map(|(count, _)| *count)
+            .collect::<Vec<_>>(),
+        [10]
+    );
     // One byte more: the buffer settles at 256 bytes, and every second row does not fit, so each starts a block.
-    let target = copy_to(&conn, &dir, "split.avro", "SELECT repeat('x', 126) AS s FROM range(10)", "")?;
-    assert_eq!(blocks(&target).iter().map(|(count, _)| *count).collect::<Vec<_>>(), [1; 10]);
+    let target = copy_to(
+        &conn,
+        &dir,
+        "split.avro",
+        "SELECT repeat('x', 126) AS s FROM range(10)",
+        "",
+    )?;
+    assert_eq!(
+        blocks(&target)
+            .iter()
+            .map(|(count, _)| *count)
+            .collect::<Vec<_>>(),
+        [1; 10]
+    );
     Ok(())
 }

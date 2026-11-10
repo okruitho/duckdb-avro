@@ -26,6 +26,12 @@ else
 	TARGET_INFO+=--package avro
 endif
 
+# The runner writes the files of __TEST_DIR__ into its test directory, so keep that out of test/sql.
+TEST_SCRATCH_DIR=duckdb_unittest_tempdir
+TEST_LIST=$(TEST_SCRATCH_DIR)/tests.txt
+TEST_RUNNER_BASE=rm -rf $(TEST_SCRATCH_DIR) && mkdir -p $(TEST_SCRATCH_DIR) && find test/sql -name '*.test' | sort > $(TEST_LIST) && \
+	$(TEST_RUNNER) --test-dir $(TEST_SCRATCH_DIR) --file-list $(TEST_LIST) $(EXTRA_EXTENSIONS_PARAM)
+
 configure: venv platform extension_version
 
 debug: build_extension_library_debug build_extension_with_metadata_debug
