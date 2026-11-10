@@ -15,7 +15,7 @@ use crate::field_ids::{ChildFieldIds, FieldId};
 /// The child DuckDB adds to a STRUCT without fields; it has no Avro counterpart.
 pub const EMPTY_STRUCT_MARKER: &str = "__duckdb_empty_struct_marker";
 
-/// Bits needed for the largest unscaled value of each precision, before the sign bit.
+// Bits needed for the largest unscaled value of each precision, before the sign bit.
 const DECIMAL_BITS_REQUIRED: [u32; 39] = [
     0, 4, 7, 10, 14, 17, 20, 24, 27, 30, 34, 37, 40, 44, 47, 50, 54, 57, 60, 64, 67, 70, 74, 77,
     80, 84, 87, 90, 94, 97, 100, 103, 107, 110, 113, 117, 120, 123, 127,

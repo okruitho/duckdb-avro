@@ -184,7 +184,12 @@ fn malformed_blocks_are_errors() -> Result<()> {
             "Avro file block ended before its declared object count",
         ),
         ("enum", 1, &[1, 3], "Enum value out of range"),
-        ("truncated", 1, &[1], "Avro file block ended before its declared object count"),
+        (
+            "truncated",
+            1,
+            &[1],
+            "Avro file block ended before its declared object count",
+        ),
     ];
     for (name, count, values, message) in cases {
         let mut data = Vec::new();
@@ -346,6 +351,29 @@ fn metadata_needs_only_the_header() -> Result<()> {
     assert!(
         message.contains("Failed to read Avro file: Incorrect Avro container file magic number"),
         "{message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn infinite_timestamp_ms_round_trips() -> Result<()> {
+    let conn = connect()?;
+    let path = std::env::temp_dir().join(format!(
+        "avro_core_timestamp_ms_{}.avro",
+        std::process::id()
+    ));
+    let file = TempFile(path);
+    conn.execute(
+        format!(
+            "COPY (FROM VALUES ('infinity'::TIMESTAMP_MS), ('-infinity'::TIMESTAMP_MS), \
+             ('2024-01-02 03:04:05.678'::TIMESTAMP_MS) t(ts)) TO '{}' (FORMAT AVRO)",
+            file.path()
+        ),
+        Parameters::None,
+    )?;
+    assert_eq!(
+        query_text(&conn, &format!("FROM read_avro('{}')", file.path()))?,
+        ["infinity", "-infinity", "2024-01-02 03:04:05.678"]
     );
     Ok(())
 }

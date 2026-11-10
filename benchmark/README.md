@@ -22,7 +22,7 @@ benchmark/run.py \
   the extension, which every other timing includes.
 - `--filter <regex>` selects benchmarks, `--threads <n>` pins the thread count, `--runs`/`--warmup` set the repetitions.
 - Results go to `benchmark/results`: one hyperfine JSON per benchmark and `summary.md` with the median, min and max per
-  build, the ratio to the baseline, and the load average while running. Runs whose coefficient of variation exceeds
+  build, the ratio to the baseline, and the load average before the runs (the runs themselves load the machine). Runs whose coefficient of variation exceeds
   5% are marked; differences within that noise are not meaningful.
 - The script refuses to start when the 1-minute load average exceeds a quarter of the cores (`--force` overrides).
   Run nothing else while benchmarking, and benchmark release builds only.

@@ -9,6 +9,7 @@ use duckdb_neo::{
     value::Value,
 };
 
+use crate::copy::schema::type_param;
 use crate::error::{binder, internal, invalid_input};
 
 /// The key of a `FIELD_IDS` struct that sets the id of the field itself.
@@ -38,7 +39,7 @@ impl FieldId {
     /// The id; a field that is only listed for the ids of its children has none, which is an error here.
     pub fn field_id(&self) -> Result<i32> {
         self.id
-            .ok_or_else(|| internal("Field id of the field is not set"))
+            .ok_or_else(|| binder("Field id of the field is not set"))
     }
 }
 
@@ -83,14 +84,6 @@ pub fn parse_field_ids(
     Ok(result)
 }
 
-fn type_param(logical_type: &LogicalType, index: usize) -> Result<LogicalType> {
-    logical_type
-        .get_param(index)?
-        .1
-        .get::<LogicalType>()?
-        .ok_or_else(|| internal("Type parameter is not a type"))
-}
-
 fn child_name_to_type(logical_type: &LogicalType) -> Result<Vec<(String, LogicalType)>> {
     match logical_type.id()? {
         LogicalTypeID::List => Ok(vec![("list".to_owned(), type_param(logical_type, 0)?)]),
@@ -113,7 +106,7 @@ fn child_name_to_type(logical_type: &LogicalType) -> Result<Vec<(String, Logical
             }
             Ok(result)
         }
-        _ => Err(internal("Unexpected type in GetChildNameToTypeMap")),
+        _ => Err(internal("Unexpected type for nested FIELD_IDS")),
     }
 }
 

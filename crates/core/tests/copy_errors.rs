@@ -338,7 +338,7 @@ fn invalid_field_ids() -> Result<()> {
         (
             "SELECT 1 a",
             "FIELD_IDS {'a': {'__duckdb_nullable': false}}",
-            DuckDBError::RuntimeInternal,
+            DuckDBError::QueryBinder,
             "Field id of the field is not set",
         ),
     ];
@@ -383,23 +383,6 @@ fn null_into_required_field() -> Result<()> {
             message,
         );
     }
-    Ok(())
-}
-
-#[test]
-fn timestamp_ms_overflow() -> Result<()> {
-    let conn = connect()?;
-    let dir = test_dir("overflow");
-    assert_error(
-        &copy_error(
-            &conn,
-            &dir,
-            "SELECT 'infinity'::TIMESTAMP_MS a",
-            "FORMAT AVRO",
-        ),
-        DuckDBError::InputOutOfRange,
-        "Overflow in multiplication of INT64 (9223372036854775807 * 1000)!",
-    );
     Ok(())
 }
 

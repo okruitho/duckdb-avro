@@ -2,7 +2,7 @@
 //! `SANITIZE_FIELD_NAMES`, `METADATA` and `CODEC`.
 
 mod encoder;
-mod schema;
+pub(crate) mod schema;
 mod writer;
 
 use std::sync::{Mutex, MutexGuard};
@@ -28,7 +28,6 @@ use crate::avro::schema::Schema;
 use crate::error::{internal, invalid_configuration, invalid_input};
 use crate::field_ids::parse_field_ids;
 
-/// The options of a COPY statement, each marked once it is looked up.
 struct CopyOptions {
     options: Vec<(String, Value)>,
     recognized: Vec<bool>,
@@ -224,11 +223,10 @@ fn write_rows(
         let row_count = chunk.row_count()?;
         for index in 0..row_count {
             row.clear();
-            let mut estimate = 0;
             for reader in &readers {
-                estimate += reader.encode(index, &mut row)?;
+                reader.encode(index, &mut row)?;
             }
-            writer.append_row(&row, estimate)?;
+            writer.append_row(&row);
         }
         writer.finish_chunk(row_count)?;
     }

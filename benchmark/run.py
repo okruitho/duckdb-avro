@@ -219,14 +219,13 @@ def main():
     version = subprocess.run([args.duckdb, "--version"], capture_output=True, text=True).stdout.strip()
     generate_data(args.duckdb, builds[0][1], data_dir, args.regenerate)
     check_machine(args.force)
+    start_load = load_average()
 
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
-    loads = []
     rows = []
     with tempfile.TemporaryDirectory(prefix="avro-bench-") as scratch:
         for benchmark in selected:
-            loads.append(load_average())
             setup = [f"SET threads = {args.threads}"] if args.threads else []
             commands = []
             for name, path in builds:
@@ -241,7 +240,7 @@ def main():
         "builds": ", ".join(f"`{name}` = `{path}`" for name, path in builds),
         "threads": args.threads or "default",
         "runs": f"{args.runs} (+{args.warmup} warm-up)",
-        "1-minute load average": f"{min(loads):.2f} to {max(loads):.2f} on {os.cpu_count()} cores",
+        "1-minute load average before the runs": f"{start_load:.2f} on {os.cpu_count()} cores",
     }
     report(rows, builds, results_dir / "summary.md", metadata)
 
